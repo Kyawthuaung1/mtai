@@ -1,0 +1,54 @@
+import { describe, expect, it, vi } from "vitest";
+import { BinanceMarketDataAgent } from "../src/agents/binance";
+import { BrowserDataCaptureAgent } from "../src/agents/browser";
+import { CmcMarketDataAgent } from "../src/agents/cmc";
+import type { MarketDataRecord } from "../src/agents/types";
+
+const request = { symbol: "btcusdt", timeframe: "1h" };
+
+describe("market data adapters", () => {
+    it("normalizes a CoinMarketCap response into a MarketDataRecord", async () => {
+        const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            expect(String(input)).toContain("symbol=BTC");
+            expect(init?.headers).toMatchObject({ "X-CMC_PRO_API_KEY": "test-key" });
+            return new Response(JSON.stringify({ data: { BTC: { id: 1 } }, status: { error_code: 0 } }));
+        });
+        const agent = new CmcMarketDataAgent({ apiKey: "test-key", baseUrl: "https://cmc.test", fetcher });
+        const [record] = await agent.collect(request);
+        expect(record).toMatchObject({ source: "cmc", symbol: "BTCUSDT", timeframe: "1h", data: { quote: { BTC: { id: 1 } } } });
+        expect(Number.isNaN(Date.parse(record.timestamp))).toBe(false);
+    });
+
+    it("normalizes a Binance klines response without altering provider data", async () => {
+        const klines = [[1700000000000, "100", "110", "90", "105", "12"]];
+        const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+            expect(String(input)).toContain("symbol=BTCUSDT");
+            expect(String(input)).toContain("interval=1h");
+            return new Response(JSON.stringify(klines));
+        });
+        const agent = new BinanceMarketDataAgent({ baseUrl: "https://binance.test", fetcher });
+        const [record] = await agent.collect(request);
+        expect(record).toMatchObject({ source: "binance", symbol: "BTCUSDT", timeframe: "1h", data: { klines } });
+    });
+
+    it("delegates browser capture and enforces the normalized source", async () => {
+        const captured: MarketDataRecord[] = [{ source: "browser", symbol: "ethusdt", timeframe: "4h", timestamp: "2026-01-01T00:00:00.000Z", data: { price: "100" } }];
+        const agent = new BrowserDataCaptureAgent(async input => {
+            expect(input).toEqual({ symbol: "btcusdt", timeframe: "1h" });
+            return captured;
+        });
+        await expect(agent.collect(request)).resolves.toEqual([{ ...captured[0], source: "browser", symbol: "ETHUSDT" }]);
+    });
+
+    it("rejects missing provider credentials and invalid requests", async () => {
+        expect(() => new CmcMarketDataAgent({ apiKey: "" })).toThrow("CoinMarketCap API key is required");
+        const agent = new BinanceMarketDataAgent({ fetcher: vi.fn() });
+        await expect(agent.collect({ symbol: " ", timeframe: "1h" })).rejects.toThrow("symbol is required");
+        await expect(agent.collect({ symbol: "BTCUSDT", timeframe: " " })).rejects.toThrow("timeframe is required");
+    });
+
+    it("surfaces upstream HTTP failures", async () => {
+        const agent = new BinanceMarketDataAgent({ fetcher: vi.fn(async () => new Response("no", { status: 503 })) });
+        await expect(agent.collect(request)).rejects.toThrow("Binance request failed with HTTP 503");
+    });
+});
