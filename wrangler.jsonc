@@ -2,7 +2,6 @@
 	"name": "mtai",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-09-08",
-	"observability": {
-		"enabled": true,
-	},
+	"observability": { "enabled": true },
+	// Add a real KV namespace binding named MARKET_DATA_STORE only when provisioned in Cloudflare.
 }
