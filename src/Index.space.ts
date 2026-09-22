@@ -1,70 +1,78 @@
-import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { MarketDataOrchestrator } from "../src/market-data/orchestrator";
+import { InMemoryMarketDataStore } from "../src/market-data/persistence";
 
-describe("MTAI Input Agent", () => {
-    it("normalizes symbol and applies the default timeframe", async () => {
-        const response = await SELF.fetch("https://example.com", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ symbol: "  btcusdt  " }),
+describe("Market data orchestration", () => {
+    it("returns normalized records from the requested provider", async () => {
+        const store = new InMemoryMarketDataStore();
+        const orchestrator = new MarketDataOrchestrator({
+            store,
+            fetcher: async () =>
+                new Response(
+                    JSON.stringify({
+                        symbol: "BTCUSDT",
+                        interval: "1h",
+                        close: 64000,
+                    }),
+                    { status: 200 },
+                ),
         });
 
-        expect(response.status).toBe(200);
-        expect(response.headers.get("content-type")).toContain("application/json");
-        expect(await response.json()).toEqual({
-            ok: true,
-            agent: "input",
-            input: { symbol: "BTCUSDT", timeframe: "1h" },
-        });
-    });
-
-    it("preserves a supplied timeframe while trimming it", async () => {
-        const response = await SELF.fetch("https://example.com", {
-            method: "POST",
-            body: JSON.stringify({ symbol: "ethusdt", timeframe: " 4h " }),
+        const result = await orchestrator.run({
+            symbol: "btcusdt",
+            timeframe: "1h",
+            providers: ["binance"],
         });
 
-        expect(response.status).toBe(200);
-        expect(await response.json()).toEqual({
-            ok: true,
-            agent: "input",
-            input: { symbol: "ETHUSDT", timeframe: "4h" },
+        expect(result.ok).toBe(true);
+        expect(result.errors).toHaveLength(0);
+        expect(result.records).toHaveLength(1);
+        expect(result.records[0]).toMatchObject({
+            source: "binance",
+            symbol: "BTCUSDT",
+            timeframe: "1h",
         });
+        expect((await store.all()).length).toBe(1);
     });
 
-    it("rejects non-POST requests", async () => {
-        const response = await SELF.fetch("https://example.com");
-        expect(response.status).toBe(405);
-        expect(await response.json()).toEqual({ ok: false, error: "POST request required" });
-    });
-
-    it("rejects invalid JSON", async () => {
-        const response = await SELF.fetch("https://example.com", {
-            method: "POST",
-            body: "not-json",
+    it("returns a stable error for unsupported providers", async () => {
+        const result = await new MarketDataOrchestrator().run({
+            symbol: "BTCUSDT",
+            timeframe: "1h",
+            providers: ["mystery"],
         });
-        expect(response.status).toBe(400);
-        expect(await response.json()).toEqual({ ok: false, error: "Invalid JSON" });
+
+        expect(result.ok).toBe(false);
+        expect(result.errors).toEqual([
+            {
+                provider: "mystery",
+                error: "Unsupported provider: mystery",
+            },
+        ]);
     });
 
-    it("rejects missing or blank symbols", async () => {
-        for (const body of [{}, { symbol: "   " }]) {
-            const response = await SELF.fetch("https://example.com", {
-                method: "POST",
-                body: JSON.stringify(body),
-            });
-            expect(response.status).toBe(400);
-            expect(await response.json()).toEqual({ ok: false, error: "symbol is required" });
-        }
-    });
+    it("drops invalid records before persistence", async () => {
+        const store = new InMemoryMarketDataStore();
+        const orchestrator = new MarketDataOrchestrator({
+            store,
+            browserCapture: async () => [{
+                source: "browser",
+                symbol: "",
+                timeframe: "1h",
+                timestamp: "invalid-date",
+                data: { price: 1 },
+            }],
+        });
 
-    it("rejects invalid JSON shapes and timeframe values", async () => {
-        for (const body of [[], { symbol: "BTCUSDT", timeframe: 1 }, { symbol: "BTCUSDT", timeframe: "   " }]) {
-            const response = await SELF.fetch("https://example.com", {
-                method: "POST",
-                body: JSON.stringify(body),
-            });
-            expect(response.status).toBe(400);
-        }
+        const result = await orchestrator.run({
+            symbol: "ETHUSD",
+            timeframe: "1h",
+            providers: ["browser"],
+        });
+
+        expect(result.ok).toBe(false);
+        expect(result.records).toHaveLength(0);
+        expect(result.errors[0]?.error).toBe("Invalid market data record");
+        expect(await store.all()).toEqual([]);
     });
 });

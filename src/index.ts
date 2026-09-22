@@ -1,68 +1,57 @@
-export interface InputRequest {
-    symbol: string;
-    timeframe?: string;
-}
+export type MarketAgentName = "cmc" | "binance" | "browser";
 
-export interface NormalizedInput {
+export type MarketProviderName = MarketAgentName;
+
+export interface MarketDataRequest {
     symbol: string;
     timeframe: string;
+    providers?: string[];
 }
 
-export interface InputAgentResponse {
+export interface MarketDataRecord {
+    source: MarketAgentName;
+    symbol: string;
+    timeframe: string;
+    timestamp: string;
+    data: Record<string, unknown>;
+}
+
+export interface MarketDataAgent {
+    readonly name: MarketAgentName;
+    collect(request: MarketDataRequest): Promise<MarketDataRecord[]>;
+}
+
+export interface MarketDataError {
+    provider: string;
+    error: string;
+}
+
+export interface MarketDataResponse {
     ok: boolean;
-    agent?: "input";
-    input?: NormalizedInput;
-    error?: string;
+    request: {
+        symbol: string;
+        timeframe: string;
+        providers: string[];
+    };
+    records: MarketDataRecord[];
+    errors: MarketDataError[];
 }
 
-function json(body: InputAgentResponse, init?: ResponseInit): Response {
-    return Response.json(body, {
-        headers: { "content-type": "application/json; charset=UTF-8" },
-        ...init,
-    });
+export interface MarketDataStore {
+    save(records: MarketDataRecord[]): Promise<void>;
 }
 
-function normalizeInput(body: Partial<InputRequest>): NormalizedInput | string {
-    if (typeof body.symbol !== "string" || !body.symbol.trim()) {
-        return "symbol is required";
-    }
+export type FetchLike = typeof fetch;
 
-    if (body.timeframe !== undefined && typeof body.timeframe !== "string") {
-        return "timeframe must be a string";
-    }
-
-    const symbol = body.symbol.trim().toUpperCase();
-    const timeframe = body.timeframe === undefined ? "1h" : body.timeframe.trim();
-
-    if (!timeframe) {
-        return "timeframe must not be empty";
-    }
-
-    return { symbol, timeframe };
+export interface CmcAgentConfig {
+    apiKey: string;
+    baseUrl?: string;
+    fetcher?: FetchLike;
 }
 
-export default {
-    async fetch(request: Request): Promise<Response> {
-        if (request.method !== "POST") {
-            return json({ ok: false, error: "POST request required" }, { status: 405 });
-        }
+export interface BinanceAgentConfig {
+    baseUrl?: string;
+    fetcher?: FetchLike;
+}
 
-        let body: unknown;
-        try {
-            body = await request.json();
-        } catch {
-            return json({ ok: false, error: "Invalid JSON" }, { status: 400 });
-        }
-
-        if (!body || typeof body !== "object" || Array.isArray(body)) {
-            return json({ ok: false, error: "JSON object required" }, { status: 400 });
-        }
-
-        const normalized = normalizeInput(body as Partial<InputRequest>);
-        if (typeof normalized === "string") {
-            return json({ ok: false, error: normalized }, { status: 400 });
-        }
-
-        return json({ ok: true, agent: "input", input: normalized });
-     },
-} satisfies ExportedHandler<Env>
+export type BrowserCapture = (request: MarketDataRequest) => Promise<MarketDataRecord[]>;
