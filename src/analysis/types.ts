@@ -1,65 +1,41 @@
-import type { MarketDataRecord } from "../agents/types";
+export type Timeframe = string;
 
-export type AnalysisStatus = "ok" | "insufficient-data" | "invalid";
-
-export interface AnalysisRequest {
-    symbol: string;
-    timeframe: string;
-    records: MarketDataRecord[];
+export interface OHLCV {
+  timestamp: string; // ISO string
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  volume?: number;
 }
 
-export interface AnalysisSourcePoint {
-    timestamp: string;
-    open?: number;
-    high?: number;
-    low?: number;
-    close?: number;
-    volume?: number;
+export interface MarketDataRecord {
+  source: string;
+  symbol: string;
+  timeframe: Timeframe;
+  timestamp: string;
+  data: Record<string, unknown>;
 }
 
-export interface IndicatorResult {
-    period: number;
-    count: number;
-    status: AnalysisStatus;
-    value?: number;
-    reason?: string;
-}
-
-export interface StatisticsSummary {
-    latestPrice?: number;
-    open?: number;
-    high?: number;
-    low?: number;
-    close?: number;
-    volume?: number;
-    absoluteChange?: number;
-    percentageChange?: number;
-    volatility?: number;
-    averagePrice?: number;
-    minPrice?: number;
-    maxPrice?: number;
-    observations: number;
-}
-
-export interface DataQualityReport {
-    status: AnalysisStatus;
-    issues: string[];
-    validRecords: number;
-    invalidRecords: number;
-    totalRecords: number;
-}
+export type QualityStatus = "ok" | "insufficient_data" | "invalid_data" | "symbol_mismatch" | "timeframe_mismatch";
 
 export interface AnalysisResult {
-    ok: boolean;
-    symbol: string;
-    timeframe: string;
-    timestamp: string;
-    dataQuality: DataQualityReport;
-    statistics: StatisticsSummary;
-    indicators: {
-        sma?: IndicatorResult;
-        ema?: IndicatorResult;
-        rsi?: IndicatorResult;
-    };
-    errors?: string[];
+  symbol: string;
+  timeframe: Timeframe;
+  sampleCount: number;
+  quality: QualityStatus;
+  statistics?: {
+    min: number;
+    max: number;
+    mean: number;
+    median: number;
+    variance: number;
+    stddev: number;
+  } | null;
+  indicators?: {
+    sma?: Record<string, number | null>;
+    ema?: Record<string, number | null>;
+    rsi?: Record<string, number | null>;
+  } | null;
+  errors?: string[];
 }
