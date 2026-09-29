@@ -78,7 +78,7 @@ export class MarketDataOrchestrator {
 
         for (const result of results) {
             if ("error" in result) {
-                errors.push({ provider: result.provider, error: result.error });
+                errors.push({ provider: result.provider, error: result.error ?? "Unknown provider error" });
                 continue;
             }
             for (const record of result.records) {

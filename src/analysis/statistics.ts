@@ -1,185 +1,152 @@
-import type { MarketDataRecord } from "../agents/types";
-import type { AnalysisSourcePoint, StatisticsSummary } from "./types";
-import { parseNumeric } from "./validation";
+import type { AnalysisSourcePoint, NormalizedMarketDataRecord, StatisticsSummary } from "./types";
+import { parseEpochTimestamp, parseNumeric, parseTimestamp } from "./validation";
 
-function numericOrUndefined(value: unknown): number | undefined {
-    return parseNumeric(value);
-}
+const NUMERIC_KEYS = ["open", "high", "low", "close", "price", "last", "value", "volume", "volume_24h", "quoteVolume", "turnover"] as const;
+const CLOSE_KEYS = ["close", "price", "last", "value"] as const;
+const TIME_KEYS = ["timestamp", "time", "timeOpen", "openTime"] as const;
 
-function readBarObject(candidate: Record<string, unknown>): AnalysisSourcePoint | undefined {
-    const openVal = numericOrUndefined(candidate.open);
-    const highVal = numericOrUndefined(candidate.high);
-    const lowVal = numericOrUndefined(candidate.low);
-    const closeVal = numericOrUndefined(candidate.close ?? candidate.price ?? candidate.last ?? candidate.value);
-    const volumeVal = numericOrUndefined(candidate.volume ?? candidate.volume_24h ?? candidate.quoteVolume ?? candidate.turnover);
-
-    if (closeVal !== undefined || openVal !== undefined || highVal !== undefined || lowVal !== undefined) {
-        const finalClose = closeVal ?? openVal ?? highVal ?? lowVal ?? 0;
-        const finalOpen = openVal ?? finalClose;
-        const finalHigh = highVal ?? Math.max(finalOpen, finalClose);
-        const finalLow = lowVal ?? Math.min(finalOpen, finalClose);
-        const timestamp = typeof candidate.timestamp === "string"
-            ? candidate.timestamp
-            : typeof candidate.time === "string"
-                ? candidate.time
-                : typeof candidate.timeOpen === "string"
-                    ? candidate.timeOpen
-                    : new Date(0).toISOString();
-
-        return {
-            timestamp,
-            open: finalOpen,
-            high: finalHigh,
-            low: finalLow,
-            close: finalClose,
-            volume: volumeVal,
-        };
+function firstNumeric(candidate: Record<string, unknown>, keys: readonly string[]): number | undefined {
+    for (const key of keys) {
+        if (candidate[key] !== undefined && candidate[key] !== null) return parseNumeric(candidate[key]);
     }
-
     return undefined;
 }
 
-function collectCandidateObjects(value: unknown, seen = new Set<object>()): Record<string, unknown>[] {
-    const results: Record<string, unknown>[] = [];
-    if (!value || typeof value !== "object") return results;
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            results.push(...collectCandidateObjects(item, seen));
-        }
-        return results;
+function timestampValue(candidate: Record<string, unknown>, fallback: string): string | undefined {
+    for (const key of TIME_KEYS) {
+        const value = candidate[key];
+        if (value === undefined || value === null) continue;
+        if (typeof value === "number") return parseEpochTimestamp(value);
+        return parseTimestamp(value);
     }
-    const candidate = value as Record<string, unknown>;
-    if (seen.has(candidate)) return results;
-    seen.add(candidate);
-    results.push(candidate);
-    for (const item of Object.values(candidate)) {
-        results.push(...collectCandidateObjects(item, seen));
-    }
-    return results;
+    return parseTimestamp(fallback);
 }
 
-export function extractBarFromRecord(record: MarketDataRecord): AnalysisSourcePoint | undefined {
-    const data = record.data;
-    if (!data || typeof data !== "object") return undefined;
+function readBarObject(candidate: Record<string, unknown>, fallbackTimestamp: string): AnalysisSourcePoint | undefined {
+    const containsPriceField = NUMERIC_KEYS.some((key) => candidate[key] !== undefined && candidate[key] !== null);
+    if (!containsPriceField) return undefined;
 
-    const direct = readBarObject(data as Record<string, unknown>);
+    for (const key of NUMERIC_KEYS) {
+        if (candidate[key] !== undefined && candidate[key] !== null && parseNumeric(candidate[key]) === undefined) return undefined;
+    }
+    const close = firstNumeric(candidate, CLOSE_KEYS);
+    if (close === undefined) return undefined;
+
+    const open = parseNumeric(candidate.open) ?? close;
+    const high = parseNumeric(candidate.high) ?? Math.max(open, close);
+    const low = parseNumeric(candidate.low) ?? Math.min(open, close);
+    const volume = firstNumeric(candidate, ["volume", "volume_24h", "quoteVolume", "turnover"]);
+    const timestamp = timestampValue(candidate, fallbackTimestamp);
+    if (!timestamp) return undefined;
+
+    return { timestamp, open, high, low, close, ...(volume === undefined ? {} : { volume }) };
+}
+
+function collectCandidateObjects(value: unknown, seen = new Set<object>()): Record<string, unknown>[] {
+    if (!value || typeof value !== "object" || seen.has(value)) return [];
+    seen.add(value);
+    if (Array.isArray(value)) return value.flatMap((item) => collectCandidateObjects(item, seen));
+    const candidate = value as Record<string, unknown>;
+    return [candidate, ...Object.values(candidate).flatMap((item) => collectCandidateObjects(item, seen))];
+}
+
+function findKlineArrays(value: unknown, seen = new Set<object>()): unknown[][] {
+    if (!value || typeof value !== "object" || seen.has(value)) return [];
+    seen.add(value);
+    if (Array.isArray(value)) return value.flatMap((item) => findKlineArrays(item, seen));
+    const candidate = value as Record<string, unknown>;
+    const found = Array.isArray(candidate.klines) ? [candidate.klines] : [];
+    return [...found, ...Object.values(candidate).flatMap((item) => findKlineArrays(item, seen))];
+}
+
+function readKline(value: unknown, fallbackTimestamp: string): AnalysisSourcePoint | undefined {
+    if (!Array.isArray(value) || value.length < 6) return undefined;
+    const [openTime, openValue, highValue, lowValue, closeValue, volumeValue] = value;
+    const open = parseNumeric(openValue);
+    const high = parseNumeric(highValue);
+    const low = parseNumeric(lowValue);
+    const close = parseNumeric(closeValue);
+    const volume = parseNumeric(volumeValue);
+    if ([open, high, low, close, volume].some((number) => number === undefined)) return undefined;
+    const timestamp = typeof openTime === "number"
+        ? parseEpochTimestamp(openTime)
+        : parseTimestamp(openTime) ?? (typeof openTime === "string" && Number.isFinite(Number(openTime)) ? parseEpochTimestamp(Number(openTime)) : undefined) ?? parseTimestamp(fallbackTimestamp);
+    if (!timestamp) return undefined;
+    return { timestamp, open: open!, high: high!, low: low!, close: close!, volume: volume! };
+}
+
+export function extractBarFromRecord(record: NormalizedMarketDataRecord): AnalysisSourcePoint | undefined {
+    const fallbackTimestamp = parseTimestamp(record.timestamp);
+    if (!fallbackTimestamp || !record.data || typeof record.data !== "object" || Array.isArray(record.data)) return undefined;
+    const data = record.data;
+    const direct = readBarObject(data, fallbackTimestamp);
     if (direct) return direct;
 
-    const candidates = collectCandidateObjects(data);
-    for (const candidate of candidates) {
-        const bar = readBarObject(candidate);
-        if (bar) return bar;
-    }
-
-    if (Array.isArray(data.klines)) {
-        const lastKline = data.klines[data.klines.length - 1];
-        if (Array.isArray(lastKline) && lastKline.length >= 6) {
-            const [openTime, open, high, low, close, volume] = lastKline as [unknown, unknown, unknown, unknown, unknown, unknown];
-            const parsedOpen = numericOrUndefined(open);
-            const parsedHigh = numericOrUndefined(high);
-            const parsedLow = numericOrUndefined(low);
-            const parsedClose = numericOrUndefined(close);
-            const parsedVolume = numericOrUndefined(volume);
-            if (parsedClose !== undefined || parsedOpen !== undefined || parsedHigh !== undefined || parsedLow !== undefined) {
-                return {
-                    timestamp: typeof openTime === "number" ? new Date(openTime).toISOString() : new Date().toISOString(),
-                    open: parsedOpen ?? parsedClose ?? parsedHigh ?? parsedLow ?? 0,
-                    high: parsedHigh ?? Math.max(parsedOpen ?? parsedClose ?? 0, parsedClose ?? parsedOpen ?? 0),
-                    low: parsedLow ?? Math.min(parsedOpen ?? parsedClose ?? 0, parsedClose ?? parsedOpen ?? 0),
-                    close: parsedClose ?? parsedOpen ?? parsedHigh ?? parsedLow ?? 0,
-                    volume: parsedVolume,
-                };
-            }
-        }
-    }
-
-    if (Array.isArray(data.candles)) {
-        const lastCandle = data.candles[data.candles.length - 1];
-        if (lastCandle && typeof lastCandle === "object") {
-            const bar = readBarObject(lastCandle as Record<string, unknown>);
+    for (const klines of findKlineArrays(data)) {
+        for (let index = klines.length - 1; index >= 0; index -= 1) {
+            const bar = readKline(klines[index], fallbackTimestamp);
             if (bar) return bar;
         }
     }
 
+    for (const candidate of collectCandidateObjects(data)) {
+        const bar = readBarObject(candidate, fallbackTimestamp);
+        if (bar) return bar;
+    }
     return undefined;
 }
 
-export function deriveStatisticsFromRecords(records: MarketDataRecord[]): StatisticsSummary {
-    const bars = records
+function sortedBars(records: readonly NormalizedMarketDataRecord[]): AnalysisSourcePoint[] {
+    return records
         .map((record) => extractBarFromRecord(record))
-        .filter((bar): bar is AnalysisSourcePoint => Boolean(bar));
+        .filter((bar): bar is AnalysisSourcePoint => bar !== undefined)
+        .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)
+            || JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
 
-    const closes = bars
-        .map((bar) => bar.close)
-        .filter((value): value is number => value !== undefined && Number.isFinite(value));
-
-    const volumes = bars
-        .map((bar) => bar.volume)
-        .filter((value): value is number => value !== undefined && Number.isFinite(value));
-
-    const highValues = bars
-        .map((bar) => bar.high)
-        .filter((value): value is number => value !== undefined && Number.isFinite(value));
-
-    const lowValues = bars
-        .map((bar) => bar.low)
-        .filter((value): value is number => value !== undefined && Number.isFinite(value));
-
-    const openValues = bars
-        .map((bar) => bar.open)
-        .filter((value): value is number => value !== undefined && Number.isFinite(value));
-
-    const latestBar = bars.at(-1);
+export function deriveStatisticsFromRecords(records: readonly NormalizedMarketDataRecord[]): StatisticsSummary {
+    const bars = sortedBars(records);
+    const closes = bars.map((bar) => bar.close);
+    const latestBar = bars.at(-1) ?? null;
     const previousClose = closes.length > 1 ? closes.at(-2) : undefined;
     const lastClose = closes.at(-1);
-    const averagePrice = closes.length > 0 ? closes.reduce((sum, value) => sum + value, 0) / closes.length : undefined;
+    const averagePrice = closes.length > 0 ? closes.reduce((sum, value) => sum + value / closes.length, 0) : undefined;
     const minPrice = closes.length > 0 ? Math.min(...closes) : undefined;
     const maxPrice = closes.length > 0 ? Math.max(...closes) : undefined;
-
-    const returns = [] as number[];
+    const returns: number[] = [];
     for (let index = 1; index < closes.length; index += 1) {
         const previous = closes[index - 1];
-        if (previous === 0) {
-            returns.push(0);
-            continue;
-        }
-        returns.push((closes[index] - previous) / previous);
+        const change = previous === 0 ? 0 : (closes[index] - previous) / previous;
+        if (Number.isFinite(change)) returns.push(change);
     }
-
-    const meanReturn = returns.length > 0 ? returns.reduce((sum, value) => sum + value, 0) / returns.length : 0;
+    const meanReturn = returns.length > 0 ? returns.reduce((sum, value) => sum + value / returns.length, 0) : 0;
     const volatility = returns.length > 0
-        ? Math.sqrt(returns.reduce((sum, value) => sum + (value - meanReturn) ** 2, 0) / returns.length)
+        ? Math.sqrt(returns.reduce((sum, value) => sum + ((value - meanReturn) ** 2) / returns.length, 0))
+        : undefined;
+    const absoluteChange = lastClose !== undefined && previousClose !== undefined ? lastClose - previousClose : undefined;
+    const percentageChange = lastClose !== undefined && previousClose !== undefined && previousClose !== 0
+        ? ((lastClose - previousClose) / previousClose) * 100
         : undefined;
 
     return {
+        latestBar,
+        latestTimestamp: latestBar?.timestamp ?? null,
         latestPrice: lastClose,
-        open: openValues.at(-1),
-        high: highValues.length > 0 ? Math.max(...highValues) : undefined,
-        low: lowValues.length > 0 ? Math.min(...lowValues) : undefined,
+        open: latestBar?.open,
+        high: bars.length > 0 ? Math.max(...bars.map((bar) => bar.high ?? bar.close)) : undefined,
+        low: bars.length > 0 ? Math.min(...bars.map((bar) => bar.low ?? bar.close)) : undefined,
         close: lastClose,
-        volume: volumes.length > 0 ? volumes.at(-1) : undefined,
-        absoluteChange: lastClose !== undefined && previousClose !== undefined ? lastClose - previousClose : undefined,
-        percentageChange: lastClose !== undefined && previousClose !== undefined && previousClose !== 0
-            ? ((lastClose - previousClose) / previousClose) * 100
-            : undefined,
-        volatility,
-        averagePrice,
+        volume: latestBar?.volume,
+        absoluteChange: Number.isFinite(absoluteChange) ? absoluteChange : undefined,
+        percentageChange: Number.isFinite(percentageChange) ? percentageChange : undefined,
+        volatility: Number.isFinite(volatility) ? volatility : undefined,
+        averagePrice: Number.isFinite(averagePrice) ? averagePrice : undefined,
         minPrice,
         maxPrice,
         observations: closes.length,
     };
 }
 
-export function buildLatestBar(records: MarketDataRecord[]): AnalysisSourcePoint | undefined {
-    const bars = records
-        .map((record) => extractBarFromRecord(record))
-        .filter((bar): bar is AnalysisSourcePoint => Boolean(bar));
-
-    if (bars.length === 0) return undefined;
-    return bars.reduce((latest, candidate) => {
-        const latestDate = Date.parse(latest.timestamp);
-        const candidateDate = Date.parse(candidate.timestamp);
-        if (Number.isNaN(latestDate) || Number.isNaN(candidateDate)) return latest;
-        return candidateDate > latestDate ? candidate : latest;
-    }, bars[0]);
+export function buildLatestBar(records: readonly NormalizedMarketDataRecord[]): AnalysisSourcePoint | undefined {
+    return sortedBars(records).at(-1) ?? undefined;
 }

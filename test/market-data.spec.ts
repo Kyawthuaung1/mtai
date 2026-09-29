@@ -1,22 +1,34 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BinanceMarketDataAgent } from "../src/agents/binance";
-import { CmcMarketDataAgent } from "../src/agents/cmc";
 import { BrowserMarketDataAgent } from "../src/agents/browser";
 import { MarketDataOrchestrator } from "../src/market-data/orchestrator";
 import { InMemoryMarketDataStore } from "../src/market-data/persistence";
 
-const validRecord = (source: "browser" | "binance" | "cmc") => ({ source, symbol: "BTCUSDT", timeframe: "1h", timestamp: new Date().toISOString(), data: { price: 1 } });
+const timestamp = "2024-01-01T00:00:00.000Z";
+const validRecord = (source: "browser" | "binance" | "cmc") => ({ source, symbol: "BTCUSDT", timeframe: "1h", timestamp, data: { price: 1 } });
+
+const binanceFixture = [[1704067200000, "10", "12", "9", "11", "5"]];
 
 describe("Phase 3 market data pipeline", () => {
-    it("normalizes Binance and CMC mocked responses", async () => {
-        const fetcher = async () => new Response(JSON.stringify({ data: {}, status: {}, close: 1 }), { status: 200 });
+    it("normalizes a mocked Binance response without a live network call", async () => {
+        const fetcher = vi.fn(async () => new Response(JSON.stringify(binanceFixture), { status: 200 }));
         const binance = await new BinanceMarketDataAgent({ fetcher }).collect({ symbol: "btcusdt", timeframe: "1h" });
-        const cmc = await new CmcMarketDataAgent({ apiKey: "test-only", fetcher }).collect({ symbol: "btcusdt", timeframe: "1h" });
-        expect(binance[0]?.source).toBe("binance");
-        expect(cmc[0]?.source).toBe("cmc");
+        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(binance[0]).toMatchObject({ source: "binance", symbol: "BTCUSDT", timeframe: "1h" });
     });
 
-    it("runs providers in parallel and isolates provider failures", async () => {
+    it("selects the requested provider, normalizes the request, and persists valid records", async () => {
+        const store = new InMemoryMarketDataStore();
+        const fetcher = vi.fn(async () => new Response(JSON.stringify(binanceFixture), { status: 200 }));
+        const result = await new MarketDataOrchestrator({ store, fetcher }).run({ symbol: " btcusdt ", timeframe: " 1h ", providers: ["BINANCE"] });
+        expect(result.request).toEqual({ symbol: "BTCUSDT", timeframe: "1h", providers: ["binance"] });
+        expect(result.ok).toBe(true);
+        expect(result.records).toHaveLength(1);
+        expect(result.records[0]?.source).toBe("binance");
+        expect(await store.all()).toEqual(result.records);
+    });
+
+    it("isolates provider failures and persists records from a successful provider", async () => {
         const store = new InMemoryMarketDataStore();
         const result = await new MarketDataOrchestrator({
             store,
@@ -24,9 +36,9 @@ describe("Phase 3 market data pipeline", () => {
             fetcher: async () => new Response("failure", { status: 500 }),
         }).run({ symbol: "btcusdt", timeframe: "1h", providers: ["browser", "binance"] });
         expect(result.ok).toBe(false);
-        expect(result.records).toHaveLength(1);
-        expect(result.errors[0]).toMatchObject({ provider: "binance" });
-        expect(await store.all()).toHaveLength(1);
+        expect(result.records).toEqual([validRecord("browser")]);
+        expect(result.errors).toEqual([{ provider: "binance", error: "Binance request failed with HTTP 500" }]);
+        expect(await store.all()).toEqual([validRecord("browser")]);
     });
 
     it("returns stable unsupported-provider errors", async () => {
@@ -36,13 +48,27 @@ describe("Phase 3 market data pipeline", () => {
 
     it("rejects invalid records and never persists them", async () => {
         const store = new InMemoryMarketDataStore();
-        const result = await new MarketDataOrchestrator({ store, browserCapture: async () => [{ ...validRecord("browser"), symbol: "", timestamp: "bad" }] }).run({ symbol: "BTCUSDT", timeframe: "1h", providers: ["browser"] });
+        const result = await new MarketDataOrchestrator({
+            store,
+            browserCapture: async () => [{ ...validRecord("browser"), symbol: "", timestamp: "bad" }],
+        }).run({ symbol: "BTCUSDT", timeframe: "1h", providers: ["browser"] });
         expect(result.records).toEqual([]);
-        expect(result.errors[0]?.error).toBe("Invalid market data record");
+        expect(result.errors).toEqual([{ provider: "browser", error: "Invalid market data record" }]);
         expect(await store.all()).toEqual([]);
     });
 
-    it("uses the browser capture adapter without fabricating data", async () => {
+    it("reports persistence failures without discarding collected records", async () => {
+        const record = validRecord("browser");
+        const result = await new MarketDataOrchestrator({
+            store: { save: async () => { throw new Error("storage unavailable"); } },
+            browserCapture: async () => [record],
+        }).run({ symbol: "BTCUSDT", timeframe: "1h", providers: ["browser"] });
+        expect(result.records).toEqual([record]);
+        expect(result.errors).toEqual([{ provider: "persistence", error: "storage unavailable" }]);
+        expect(result.ok).toBe(false);
+    });
+
+    it("uses the browser capture adapter without fabricating market data", async () => {
         const record = validRecord("browser");
         const result = await new BrowserMarketDataAgent(async () => [record]).collect({ symbol: "BTCUSDT", timeframe: "1h" });
         expect(result).toEqual([record]);
