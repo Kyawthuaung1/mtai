@@ -89,7 +89,7 @@ export class MarketDataOrchestrator {
 
         if (records.length > 0) {
             try {
-                await this.store.save(records);
+                await this.store.upsert(records);
             } catch (error) {
                 errors.push({ provider: "persistence", error: error instanceof Error ? error.message : "Persistence failed" });
             }

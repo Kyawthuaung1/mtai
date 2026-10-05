@@ -60,7 +60,12 @@ describe("Phase 3 market data pipeline", () => {
     it("reports persistence failures without discarding collected records", async () => {
         const record = validRecord("browser");
         const result = await new MarketDataOrchestrator({
-            store: { save: async () => { throw new Error("storage unavailable"); } },
+            store: {
+                save: async () => {},
+                upsert: async () => { throw new Error("storage unavailable"); },
+                query: async () => [],
+                all: async () => [],
+            },
             browserCapture: async () => [record],
         }).run({ symbol: "BTCUSDT", timeframe: "1h", providers: ["browser"] });
         expect(result.records).toEqual([record]);
