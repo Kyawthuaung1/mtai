@@ -1,28 +1,23 @@
-name: NodeJS with Webpack
+name: MTAI CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main", "phase6-analysis"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main", "phase6-analysis"]
 
 jobs:
-  build:
+  test-and-typecheck:
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        node-version: [18.x, 20.x, 22.x]
-
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-
-    - name: Build
-      run: |
-        npm install
-        npx webpack
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run tests
+        run: npx vitest run
+      - name: Type-check source
+        run: npx tsc --noEmit
