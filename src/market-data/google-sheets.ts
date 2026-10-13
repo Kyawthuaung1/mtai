@@ -5,7 +5,7 @@ import type {
 } from "../agents/types";
 
 export interface GoogleSheetsClient {
-  appendRows(values: string[][]): Promise<void>;
+  replaceRows(values: string[][]): Promise<void>;
   readRows(): Promise<string[][]>;
 }
 
@@ -115,7 +115,7 @@ export class GoogleSheetsMarketDataStore implements MarketDataStore {
         .map(toRow),
     ];
 
-    await this.client.appendRows(rows);
+    await this.client.replaceRows(rows);
   }
 
   async all(): Promise<MarketDataRecord[]> {

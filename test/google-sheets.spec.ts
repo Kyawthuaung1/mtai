@@ -8,7 +8,7 @@ import type { MarketDataRecord } from "../src/agents/types";
 class FakeSheets implements GoogleSheetsClient {
   rows: string[][] = [];
 
-  async appendRows(values: string[][]): Promise<void> {
+  async replaceRows(values: string[][]): Promise<void> {
     this.rows = values;
   }
 
