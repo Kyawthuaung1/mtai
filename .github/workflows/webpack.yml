@@ -5,6 +5,7 @@ on:
     branches: ["main", "phase6-analysis"]
   pull_request:
     branches: ["main", "phase6-analysis"]
+  workflow_dispatch:
 
 jobs:
   test-and-typecheck:
